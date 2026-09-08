@@ -13,6 +13,21 @@ app.registerExtension({
             const widgets = Object.fromEntries(node.widgets.map((widget) => [widget.name, widget]));
             const choices = Object.entries(inputs).filter(([, definition]) => definition[0] === "COMBO");
             const root = document.createElement("div");
+            // DOM widgets sit above the canvas. Forward navigation gestures just
+            // as ComfyUI's own DOM previews do, including moves and releases.
+            for (const type of ["pointerdown", "pointermove", "pointerup"]) {
+                root.addEventListener(type, (event) => {
+                    if (!(event.button === 1 || (event.buttons & 4))) return;
+                    const canvas = app.canvas?.canvas;
+                    if (!canvas) return;
+                    event.preventDefault();
+                    event.stopPropagation();
+                    canvas.dispatchEvent(new PointerEvent(event.type, event));
+                }, { capture: true });
+            }
+            root.addEventListener("auxclick", (event) => {
+                if (event.button === 1) event.preventDefault();
+            });
             root.addEventListener("keydown", (event) => event.stopPropagation());
             const shadow = root.attachShadow({ mode: "open" });
             shadow.innerHTML = `<style>
@@ -74,6 +89,9 @@ app.registerExtension({
                     const details = readDetails();
                     const duration = "duration" in details ? details.duration : 5;
                     if (!Number.isFinite(duration) || duration <= 0 || duration > 150) throw new Error("영상 길이를 0초 초과, 150초 이하로 입력하세요.");
+                    if (widgets.clothing.value === "다른 옷 · 직접 지정" && !details.fields?.clothing?.prompt?.trim()) {
+                        throw new Error("의상 추가 프롬프트에 원하는 옷을 입력하세요.");
+                    }
                     for (const [name, entry] of Object.entries(details.fields ?? {})) {
                         if ("start" in entry || "end" in entry) {
                             if (!(Number.isFinite(entry.start) && Number.isFinite(entry.end) && 0 <= entry.start && entry.start < entry.end && entry.end <= duration)) {

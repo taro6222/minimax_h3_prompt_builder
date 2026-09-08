@@ -63,6 +63,37 @@ class PromptDetailsTests(unittest.TestCase):
             with self.subTest(settings=settings), self.assertRaises(ValueError):
                 self.node.execute(**self.inputs, prompt_details=settings)
 
+    def test_clothing_replacement_and_world_retention(self):
+        prompt = self.generate({"clothing": {"prompt": "A blue silk robe."}},
+                               clothing="다른 옷 · 직접 지정", era="마법의 세계", background_source="<Picture 2>")
+        self.assertIn("A blue silk robe.", prompt)
+        self.assertIn("magical fantasy world", prompt)
+        retention = prompt.split("retention_analysis:\n")[1].split("\n\ndetailed_description:")[0]
+        self.assertNotIn("fully_preserved", retention)
+        self.assertIn("replacing clothing", retention)
+        self.assertIn("adapting architecture", retention)
+        with self.assertRaises(ValueError):
+            self.generate({}, clothing="다른 옷 · 직접 지정")
+
+    def test_new_defaults_and_old_widget_order(self):
+        old = {key: value for key, value in self.inputs.items() if key not in ("clothing", "era")}
+        self.assertEqual(self.node.execute(**old).result, self.node.execute(**self.inputs).result)
+        names = [field.id for field in self.node.define_schema().inputs]
+        self.assertEqual(names[-3:], ["prompt_details", "clothing", "era"])
+        prompt = self.generate({})
+        self.assertIn("original clothing and accessories unchanged", prompt)
+        self.assertIn("fully_preserved", prompt)
+
+    def test_all_new_presets_and_extra_descriptions(self):
+        for name, (_, options) in builder.EXTRA_OPTIONS.items():
+            for option, phrase in options.items():
+                with self.subTest(name=name, option=option):
+                    prompt = self.generate({name: {"prompt": "Custom detail."}}, **{name: option})
+                    self.assertIn(phrase, prompt)
+                    self.assertIn("Custom detail.", prompt)
+        with self.assertRaises(ValueError):
+            self.generate({"era": {"start": 0, "end": 3}})
+
     def test_default_api_call_and_serialized_roundtrip(self):
         self.assertEqual(self.node.execute(**self.inputs).result, self.node.execute(**self.inputs, prompt_details="{}").result)
         raw = json.dumps({"fields": {"action": {"prompt": "Wait, then wave.", "start": 1, "end": 4}}, "duration": 5})

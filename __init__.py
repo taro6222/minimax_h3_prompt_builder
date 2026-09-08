@@ -9,6 +9,7 @@ DETAIL_FIELDS = {
     "subject_kind": False, "background_source": False, "action": True,
     "framing": False, "camera_direction": False, "camera": True,
     "lighting": True, "style": False, "soundscape": True, "music": True,
+    "clothing": False, "era": False,
 }
 
 
@@ -140,6 +141,36 @@ OPTIONS = {
 }
 
 
+EXTRA_OPTIONS = {
+    "clothing": ("의상", {
+        "원본 의상 유지": "Keep the subject's original clothing and accessories unchanged, if present.",
+        "원본 의상 유지 안 함 · 자동 선택": "Replace the original outfit with a different outfit appropriate to the setting, keeping it consistent throughout the shot.",
+        "다른 옷 · 직접 지정": "Replace the original outfit with the outfit described below and keep it consistent throughout the shot.",
+        "캐주얼": "Dress the subject in a casual shirt, trousers, and comfortable shoes instead of the original outfit.",
+        "정장": "Dress the subject in a tailored formal suit instead of the original outfit.",
+        "드레스": "Dress the subject in an elegant dress instead of the original outfit.",
+        "한복": "Dress the subject in traditional Korean hanbok instead of the original outfit.",
+        "중세 의상": "Dress the subject in a medieval tunic, cloak, and leather boots instead of the original outfit.",
+        "마법사 의상": "Dress the subject in layered wizard robes with embroidered magical motifs instead of the original outfit.",
+        "갑옷": "Dress the subject in fitted medieval plate armor instead of the original outfit.",
+        "미래 의상": "Dress the subject in a futuristic technical outfit with sleek materials instead of the original outfit.",
+    }),
+    "era": ("시대·세계관", {
+        "지정 안 함": "",
+        "현대": "Set the scene in the contemporary world with present-day architecture and props.",
+        "마법의 세계": "Set the scene in a magical fantasy world with enchanted architecture, glowing runes, and wondrous environmental details.",
+        "중세 시대": "Set the scene in the medieval era with stone and timber buildings and period-appropriate props, without modern technology.",
+        "고대 시대": "Set the scene in the ancient world with stone monuments and handcrafted period-appropriate props.",
+        "조선 시대": "Set the scene in Joseon-era Korea with traditional Korean architecture and period-appropriate props, without modern technology.",
+        "근대·산업혁명": "Set the scene in the industrial age with brick buildings, steam machinery, and period-appropriate props.",
+        "미래": "Set the scene in the future with advanced architecture, intelligent infrastructure, and futuristic props.",
+        "사이버펑크": "Set the scene in a cyberpunk future with dense urban architecture, neon signage, and high-tech environmental details.",
+        "스팀펑크": "Set the scene in a steampunk world with brass mechanisms, steam-powered machines, and Victorian-inspired architecture.",
+        "포스트 아포칼립스": "Set the scene in a post-apocalyptic world with weathered ruins, reclaimed materials, and overgrown infrastructure.",
+    }),
+}
+
+
 class MiniMaxH3RefPromptBuilder(io.ComfyNode):
     @classmethod
     def define_schema(cls):
@@ -158,6 +189,9 @@ class MiniMaxH3RefPromptBuilder(io.ComfyNode):
         inputs.append(io.String.Input("prompt_details", default="{}", optional=True,
             dynamic_prompts=False, extra_dict={"h3_detail_fields": DETAIL_FIELDS},
             tooltip="버튼 UI의 시간·추가 프롬프트 설정"))
+        # Append after every existing widget to preserve positional workflow values.
+        inputs.extend(io.Combo.Input(name, display_name=label, options=list(choices), optional=True)
+                      for name, (label, choices) in EXTRA_OPTIONS.items())
         return io.Schema(
             node_id="MiniMaxH3RefPromptBuilder",
             display_name="MiniMax H3 REF 프롬프트 선택기",
@@ -170,8 +204,15 @@ class MiniMaxH3RefPromptBuilder(io.ComfyNode):
     @classmethod
     def execute(cls, subject_source, background_source, camera_source, music_source,
                 subject_kind, action, framing, camera, lighting, style, soundscape, music,
-                camera_direction="지정 안 함", prompt_details="{}"):
+                camera_direction="지정 안 함", prompt_details="{}",
+                clothing="원본 의상 유지", era="지정 안 함"):
         details, fields = parse_details(prompt_details)
+        clothing_text = EXTRA_OPTIONS["clothing"][1][clothing]
+        era_text = EXTRA_OPTIONS["era"][1][era]
+        if clothing == "다른 옷 · 직접 지정" and not fields.get("clothing", {}).get("prompt", "").strip():
+            raise ValueError("다른 옷 · 직접 지정: 의상 추가 프롬프트에 원하는 옷을 입력하세요.")
+        change_clothing = clothing != "원본 의상 유지"
+        change_era = bool(era_text or fields.get("era", {}).get("prompt", "").strip())
         for value, allowed in (
             (subject_source, VISUAL_SOURCES), (background_source, [NONE] + VISUAL_SOURCES),
             (camera_source, [NONE] + VISUAL_SOURCES[9:]),
@@ -185,11 +226,19 @@ class MiniMaxH3RefPromptBuilder(io.ComfyNode):
         phrases = {name: OPTIONS[name][1][value] for name, value in selected.items()}
         definitions = [f"<Subject 1> is {phrases['subject_kind']} visible in {subject_source}; its recognizable appearance, proportions, colors, and surface details define the subject's visual identity."]
         retention = ["<Subject 1> (appears in [Shot 1]): fully_preserved - retain the defined visual identity while performing the target action."]
+        if change_clothing:
+            definitions[0] = f"<Subject 1> is {phrases['subject_kind']} visible in {subject_source}; its identifying facial or structural features and proportions define its identity, excluding clothing and accessories."
+            retention[0] = "<Subject 1> (appears in [Shot 1]): partially_preserved - retain identifying features and proportions while replacing clothing and accessories as specified."
         setting = "The setting is a simple open space with an uncluttered background and a clearly defined ground plane."
         if background_source != NONE:
             definitions.append(f"<Subject 2> is the environment visible in {background_source}, providing the background layout, spatial arrangement, and recognizable environmental features.")
             retention.append("<Subject 2> (appears in [Shot 1]): fully_preserved - preserve the environment's layout and recognizable features under the target lighting.")
             setting = "The setting is <Subject 2>; its referenced layout surrounds <Subject 1>, with foreground and background elements retaining their spatial relationships."
+            if change_era:
+                definitions[-1] = f"<Subject 2> is the environment in {background_source}, used as a spatial layout reference for the target era and world."
+                retention[-1] = "<Subject 2> (appears in [Shot 1]): partially_preserved - retain spatial layout while adapting architecture, materials, and props to the specified era and world."
+        clothing_text = describe_interval(clothing_text, fields.get("clothing", {}), "Clothing")
+        era_text = describe_interval(era_text, fields.get("era", {}), "Era and world")
         camera_text = phrases["camera"] + "."
         if camera_source != NONE:
             definitions.append(f"{camera_source} provides camera motion for the single target shot; its subjects and cuts are not reused.")
@@ -227,7 +276,7 @@ class MiniMaxH3RefPromptBuilder(io.ComfyNode):
             f"{phrases['style']}\n[Shot 1] {phrases['framing']}. "
             f"{direction_text}"
             f"<Subject 1> is clearly recognizable through the appearance established by {subject_source}. "
-            f"{setting} {phrases['lighting']}. "
+            f"{setting} {era_text} {clothing_text} {phrases['lighting']}. "
             "At the opening, the subject is clearly separated from the background, allowing its outline, relative scale, and visible surface details to be read. "
             "The arrangement leaves enough space for the action to unfold without obscuring the subject behind foreground elements. "
             f"As the shot progresses, {action_text} "
