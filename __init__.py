@@ -54,6 +54,20 @@ OPTIONS = {
         "시네마틱": "Low strings and a restrained piano motif build slowly, then resolve softly at the end.",
         "전자음악": "A light synthesizer pulse and muted percussion keep a steady mid-tempo beat with a brief final fade.",
     }),
+    "camera_direction": ("카메라 방향 (시작 시점)", {
+        "지정 안 함": "",
+        "전면": "At the start, the camera views <Subject 1> directly from the front.",
+        "좌측면": "At the start, the camera views <Subject 1> in profile from the subject's left side.",
+        "우측면": "At the start, the camera views <Subject 1> in profile from the subject's right side.",
+        "후면": "At the start, the camera views <Subject 1> directly from behind.",
+        "좌측 전방 사선": "At the start, the camera views <Subject 1> from a front-left three-quarter angle, relative to the subject.",
+        "우측 전방 사선": "At the start, the camera views <Subject 1> from a front-right three-quarter angle, relative to the subject.",
+        "좌측 후방 사선": "At the start, the camera views <Subject 1> from a rear-left three-quarter angle, relative to the subject.",
+        "우측 후방 사선": "At the start, the camera views <Subject 1> from a rear-right three-quarter angle, relative to the subject.",
+        "위에서 내려다보기": "At the start, the camera looks down at <Subject 1> from a high angle.",
+        "아래에서 올려다보기": "At the start, the camera looks up at <Subject 1> from a low angle.",
+        "수직 탑뷰": "At the start, the camera looks vertically down at <Subject 1> from directly overhead.",
+    }),
 }
 
 
@@ -69,7 +83,8 @@ class MiniMaxH3RefPromptBuilder(io.ComfyNode):
             io.Combo.Input("music_source", display_name="음악 참조 오디오", options=[NONE] + [f"<Audio {i}>" for i in range(1, 4)],
                 tooltip="선택하면 아래 배경음악 대신 해당 오디오의 음악 스타일을 참조합니다. 원본을 복사하지 않습니다. 영상에 연결한 오디오가 먼저 번호를 받습니다."),
         ]
-        inputs.extend(io.Combo.Input(name, display_name=label, options=list(choices))
+        inputs.extend(io.Combo.Input(name, display_name=label, options=list(choices),
+                                    optional=name == "camera_direction")
                       for name, (label, choices) in OPTIONS.items())
         return io.Schema(
             node_id="MiniMaxH3RefPromptBuilder",
@@ -82,7 +97,8 @@ class MiniMaxH3RefPromptBuilder(io.ComfyNode):
 
     @classmethod
     def execute(cls, subject_source, background_source, camera_source, music_source,
-                subject_kind, action, framing, camera, lighting, style, soundscape, music):
+                subject_kind, action, framing, camera, lighting, style, soundscape, music,
+                camera_direction="지정 안 함"):
         for value, allowed in (
             (subject_source, VISUAL_SOURCES), (background_source, [NONE] + VISUAL_SOURCES),
             (camera_source, [NONE] + VISUAL_SOURCES[9:]),
@@ -91,7 +107,8 @@ class MiniMaxH3RefPromptBuilder(io.ComfyNode):
             if value not in allowed:
                 raise ValueError(f"지원하지 않는 참조 태그: {value}")
         selected = dict(subject_kind=subject_kind, action=action, framing=framing, camera=camera,
-                        lighting=lighting, style=style, soundscape=soundscape, music=music)
+                        lighting=lighting, style=style, soundscape=soundscape, music=music,
+                        camera_direction=camera_direction)
         phrases = {name: OPTIONS[name][1][value] for name, value in selected.items()}
         definitions = [f"<Subject 1> is {phrases['subject_kind']} visible in {subject_source}; its recognizable appearance, proportions, colors, and surface details define the subject's visual identity."]
         retention = ["<Subject 1> (appears in [Shot 1]): fully_preserved - retain the defined visual identity while performing the target action."]
@@ -121,8 +138,10 @@ class MiniMaxH3RefPromptBuilder(io.ComfyNode):
             summary += f" Camera motion is guided by {camera_source}."
         if music_source != NONE:
             summary += f" The score references {music_source}."
+        direction_text = phrases["camera_direction"] + " " if phrases["camera_direction"] else ""
         detail = (
             f"{phrases['style']}\n[Shot 1] {phrases['framing']}. "
+            f"{direction_text}"
             f"<Subject 1> is clearly recognizable through the appearance established by {subject_source}. "
             f"{setting} {phrases['lighting']}. "
             "At the opening, the subject is clearly separated from the background, allowing its outline, relative scale, and visible surface details to be read. "
