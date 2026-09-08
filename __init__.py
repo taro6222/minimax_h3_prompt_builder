@@ -1,0 +1,161 @@
+from comfy_api.latest import ComfyExtension, io
+
+
+VISUAL_SOURCES = [f"<Picture {i}>" for i in range(1, 10)] + [f"<Video {i}>" for i in range(1, 4)]
+NONE = "사용 안 함"
+OPTIONS = {
+    "subject_kind": ("주인공 종류", {
+        "인물": "the main person", "동물": "the main animal", "제품·사물": "the main object",
+    }),
+    "action": ("동작", {
+        "자연스럽게 유지": "remains in place with subtle, natural movement",
+        "카메라 쪽으로 이동": "moves slowly toward the camera, then settles to a stop",
+        "왼쪽에서 오른쪽으로 이동": "moves steadily from the left side of the frame to the right",
+        "천천히 회전": "turns slowly to reveal a three-quarter view, then holds that orientation",
+        "주변 둘러보기": "looks slowly from one side of the environment to the other, then looks forward",
+        "미소 짓기": "looks toward the camera and gradually forms a relaxed smile",
+    }),
+    "framing": ("구도", {
+        "미디엄 샷": "A medium shot places the subject at the center of the frame",
+        "클로즈업": "A close-up fills the frame with the subject's most recognizable details",
+        "와이드 샷": "A wide shot places the subject in the middle ground with the environment clearly visible",
+        "전신·전체 샷": "A full shot keeps the entire subject visible with space around its silhouette",
+    }),
+    "camera": ("카메라 움직임", {
+        "고정": "The camera stays locked in position throughout the shot",
+        "천천히 다가가기": "The camera makes a slow, short dolly move toward the subject",
+        "천천히 멀어지기": "The camera pulls back slowly, revealing more of the surroundings",
+        "옆으로 따라가기": "The camera tracks smoothly alongside the subject at a steady distance",
+        "반원 궤도 이동": "The camera slowly arcs around the subject through a half circle",
+    }),
+    "lighting": ("조명", {
+        "부드러운 자연광": "Soft daylight produces gentle shadows and balanced exposure",
+        "골든아워": "Low golden sunlight creates warm highlights and long, soft-edged shadows",
+        "스튜디오": "A broad studio key light and soft fill reveal surface detail against controlled shadows",
+        "야간 네온": "Colored neon light traces the subject's edges against a dim evening environment",
+    }),
+    "style": ("영상 스타일", {
+        "실사 영화": "The target video has a live-action cinematic look with realistic materials and restrained color grading.",
+        "다큐멘터리": "The target video has a natural documentary look with lifelike textures and neutral colors.",
+        "제품 광고": "The target video has a polished commercial look with clean surfaces and precise visual detail.",
+        "3D 애니메이션": "The target video has a stylized 3D animated look with coherent shapes and softly rendered materials.",
+        "2D 애니메이션": "The target video has a 2D animated look with clean outlines and consistent painted shading.",
+    }),
+    "soundscape": ("환경음", {
+        "조용한 실내": "A quiet indoor air tone continues evenly, with faint movement sounds synchronized to visible actions.",
+        "자연": "A light breeze and distant birds form a soft outdoor ambience, with nearby motion sounds matching the image.",
+        "도시": "Distant traffic and a soft city rumble continue beneath sounds caused by visible movement.",
+        "환경음 없음": "No environmental sound effects or ambient noise.",
+    }),
+    "music": ("배경음악", {
+        "없음": "N/A",
+        "잔잔한 피아노": "A quiet solo piano plays at a slow tempo with widely spaced notes and a gentle decay at the end.",
+        "어쿠스틱": "Soft acoustic guitar plays a relaxed mid-tempo pattern, keeping a steady low volume before fading out.",
+        "시네마틱": "Low strings and a restrained piano motif build slowly, then resolve softly at the end.",
+        "전자음악": "A light synthesizer pulse and muted percussion keep a steady mid-tempo beat with a brief final fade.",
+    }),
+}
+
+
+class MiniMaxH3RefPromptBuilder(io.ComfyNode):
+    @classmethod
+    def define_schema(cls):
+        inputs = [
+            io.Combo.Input("subject_source", display_name="주인공 참조", options=VISUAL_SOURCES,
+                tooltip="Reference to Video에 실제 연결한 자료의 태그를 선택하세요. 파일 내용을 분석하지 않습니다."),
+            io.Combo.Input("background_source", display_name="배경 참조", options=[NONE] + VISUAL_SOURCES),
+            io.Combo.Input("camera_source", display_name="카메라 참조 영상", options=[NONE] + VISUAL_SOURCES[9:],
+                tooltip="선택하면 아래 카메라 움직임 대신 해당 영상의 카메라 움직임을 참조합니다."),
+            io.Combo.Input("music_source", display_name="음악 참조 오디오", options=[NONE] + [f"<Audio {i}>" for i in range(1, 4)],
+                tooltip="선택하면 아래 배경음악 대신 해당 오디오의 음악 스타일을 참조합니다. 원본을 복사하지 않습니다. 영상에 연결한 오디오가 먼저 번호를 받습니다."),
+        ]
+        inputs.extend(io.Combo.Input(name, display_name=label, options=list(choices))
+                      for name, (label, choices) in OPTIONS.items())
+        return io.Schema(
+            node_id="MiniMaxH3RefPromptBuilder",
+            display_name="MiniMax H3 REF 프롬프트 선택기",
+            category="MiniMax H3/prompt",
+            description="한글 옵션으로 단일 샷 영문 REF 프롬프트를 만듭니다. prompt 출력을 MiniMax H3 Reference to Video의 prompt에 연결하세요. 선택한 태그와 실제 참조 입력 순서를 맞춰야 합니다.",
+            inputs=inputs,
+            outputs=[io.String.Output(display_name="prompt")],
+        )
+
+    @classmethod
+    def execute(cls, subject_source, background_source, camera_source, music_source,
+                subject_kind, action, framing, camera, lighting, style, soundscape, music):
+        for value, allowed in (
+            (subject_source, VISUAL_SOURCES), (background_source, [NONE] + VISUAL_SOURCES),
+            (camera_source, [NONE] + VISUAL_SOURCES[9:]),
+            (music_source, [NONE] + [f"<Audio {i}>" for i in range(1, 4)]),
+        ):
+            if value not in allowed:
+                raise ValueError(f"지원하지 않는 참조 태그: {value}")
+        selected = dict(subject_kind=subject_kind, action=action, framing=framing, camera=camera,
+                        lighting=lighting, style=style, soundscape=soundscape, music=music)
+        phrases = {name: OPTIONS[name][1][value] for name, value in selected.items()}
+        definitions = [f"<Subject 1> is {phrases['subject_kind']} visible in {subject_source}; its recognizable appearance, proportions, colors, and surface details define the subject's visual identity."]
+        retention = ["<Subject 1> (appears in [Shot 1]): fully_preserved - retain the defined visual identity while performing the target action."]
+        setting = "The setting is a simple open space with an uncluttered background and a clearly defined ground plane."
+        if background_source != NONE:
+            definitions.append(f"<Subject 2> is the environment visible in {background_source}, providing the background layout, spatial arrangement, and recognizable environmental features.")
+            retention.append("<Subject 2> (appears in [Shot 1]): fully_preserved - preserve the environment's layout and recognizable features under the target lighting.")
+            setting = "The setting is <Subject 2>; its referenced layout surrounds <Subject 1>, with foreground and background elements retaining their spatial relationships."
+        camera_text = phrases["camera"] + "."
+        if camera_source != NONE:
+            definitions.append(f"{camera_source} provides camera motion for the single target shot; its subjects and cuts are not reused.")
+            retention.append(f"{camera_source} (camera movement in [Shot 1]): partially_preserved - follow the source camera trajectory and pace within one continuous shot.")
+            camera_text = f"The camera follows the movement direction and pace of {camera_source}, adapting its framing to keep <Subject 1> visible in one continuous shot."
+        music_text = phrases["music"]
+        audio_in_shot = ""
+        if music_source != NONE:
+            definitions.append(f"{music_source} is the musical style and instrumental texture reference for the audience-only score.")
+            retention.append(f"{music_source}: reference - generate new instrumental music guided by its musical character without copying the signal or vocal content.")
+            music_text = f"New instrumental background music follows the instrumentation, tempo, and dynamics of {music_source}, remaining behind the scene sounds and resolving at the end."
+            audio_in_shot = f"An audience-only instrumental score guided by {music_source} accompanies the shot from its opening and remains continuous as the action develops."
+        elif music != "없음":
+            audio_in_shot = music_text
+        task = "reference generation + audio reference" if music_source != NONE else "reference generation"
+        summary = f"[{task}] A single continuous shot shows <Subject 1> performing a simple action"
+        summary += " within <Subject 2>." if background_source != NONE else " in an uncluttered setting."
+        if camera_source != NONE:
+            summary += f" Camera motion is guided by {camera_source}."
+        if music_source != NONE:
+            summary += f" The score references {music_source}."
+        detail = (
+            f"{phrases['style']}\n[Shot 1] {phrases['framing']}. "
+            f"<Subject 1> is clearly recognizable through the appearance established by {subject_source}. "
+            f"{setting} {phrases['lighting']}. "
+            "At the opening, the subject is clearly separated from the background, allowing its outline, relative scale, and visible surface details to be read. "
+            "The arrangement leaves enough space for the action to unfold without obscuring the subject behind foreground elements. "
+            f"As the shot progresses, <Subject 1> {phrases['action']}. "
+            "The movement develops gradually from the opening state, with a clear beginning, an uninterrupted middle phase, and a settled final pose. "
+            "Its proportions and identifying features remain consistent as the viewpoint changes. "
+            "Visible contact with the ground or surrounding surfaces stays physically coherent, and shadows follow the same lighting direction throughout. "
+            f"{camera_text} "
+            "The framing remains readable during the movement, allowing the viewer to follow the subject's position relative to the environment. "
+            "Nearer surfaces and distant background details maintain a coherent sense of depth, with any visible parallax following the camera movement. "
+            "Focus remains on the subject's defining details, while the background supports the composition without drawing attention away from the main action. "
+            "The chosen light reveals shape and texture continuously; highlights and shaded areas evolve smoothly with the visible motion. "
+            "There are no abrupt changes of location or unexplained substitutions of the subject during the shot. "
+            f"{phrases['soundscape']} {audio_in_shot} "
+            "No dialogue, narration, or singing is introduced. "
+            "As the action concludes, the subject settles naturally and the composition remains stable long enough to read the final state. "
+            "The ending grows directly from the preceding movement, preserving the same subject, environment, and lighting through the last frame. "
+            "The shot remains continuous throughout, with no intervening cut or sudden transition to another scene."
+        )
+        sections = {
+            "subject_definitions": "\n".join(definitions), "summary": summary,
+            "retention_analysis": "\n".join(retention), "detailed_description": detail,
+            "overall_soundscape": phrases["soundscape"], "non_diegetic_music": music_text,
+        }
+        prompt = "\n\n".join(f"{name}:\n{body}" for name, body in sections.items())
+        return io.NodeOutput(prompt)
+
+
+class MiniMaxH3PromptExtension(ComfyExtension):
+    async def get_node_list(self):
+        return [MiniMaxH3RefPromptBuilder]
+
+
+async def comfy_entrypoint():
+    return MiniMaxH3PromptExtension()
