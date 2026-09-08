@@ -1,4 +1,52 @@
+import json
+import math
+
 from comfy_api.latest import ComfyExtension, io
+
+
+WEB_DIRECTORY = "./web"
+DETAIL_FIELDS = {
+    "subject_kind": False, "background_source": False, "action": True,
+    "framing": False, "camera_direction": False, "camera": True,
+    "lighting": True, "style": False, "soundscape": True, "music": True,
+}
+
+
+def parse_details(value):
+    try:
+        data = json.loads(value)
+    except json.JSONDecodeError as exc:
+        raise ValueError("시간·프롬프트 설정을 읽을 수 없습니다.") from exc
+    if not isinstance(data, dict) or set(data) - {"duration", "fields"}:
+        raise ValueError("시간·프롬프트 설정 형식이 잘못되었습니다.")
+    duration = data.get("duration", 5)
+    if type(duration) not in (int, float) or not math.isfinite(duration) or not 0 < duration <= 150:
+        raise ValueError("영상 길이는 0초 초과, 150초 이하여야 합니다.")
+    fields = data.get("fields", {})
+    if not isinstance(fields, dict) or set(fields) - DETAIL_FIELDS.keys():
+        raise ValueError("지원하지 않는 추가 프롬프트 항목입니다.")
+    for name, entry in fields.items():
+        if not isinstance(entry, dict) or set(entry) - {"prompt", "start", "end"}:
+            raise ValueError(f"{name}: 추가 프롬프트 형식이 잘못되었습니다.")
+        if not isinstance(entry.get("prompt", ""), str):
+            raise ValueError(f"{name}: 프롬프트는 문자열이어야 합니다.")
+        if "start" in entry or "end" in entry:
+            start, end = entry.get("start"), entry.get("end")
+            if not DETAIL_FIELDS[name]:
+                raise ValueError(f"{name}: 시간 구간을 지원하지 않는 항목입니다.")
+            if any(type(t) not in (int, float) or not math.isfinite(t) for t in (start, end)) or not 0 <= start < end <= duration:
+                raise ValueError(f"{name}: 0 ≤ 시작 < 종료 ≤ 영상 길이({duration}초)를 지켜주세요.")
+    return data, fields
+
+
+def describe_interval(text, entry, label):
+    extra = entry.get("prompt", "").strip()
+    if extra:
+        text = ("" if text == "N/A" else text + " ") + extra
+    if "start" in entry:
+        text = text.replace("throughout the shot", "during this interval").replace("throughout the video", "during this interval")
+        return f"{label} applies from {entry['start']:.3f} to {entry['end']:.3f} seconds: {text}"
+    return text
 
 
 VISUAL_SOURCES = [f"<Picture {i}>" for i in range(1, 10)] + [f"<Video {i}>" for i in range(1, 4)]
@@ -107,6 +155,9 @@ class MiniMaxH3RefPromptBuilder(io.ComfyNode):
         inputs.extend(io.Combo.Input(name, display_name=label, options=list(choices),
                                     optional=name == "camera_direction")
                       for name, (label, choices) in OPTIONS.items())
+        inputs.append(io.String.Input("prompt_details", default="{}", optional=True,
+            dynamic_prompts=False, extra_dict={"h3_detail_fields": DETAIL_FIELDS},
+            tooltip="버튼 UI의 시간·추가 프롬프트 설정"))
         return io.Schema(
             node_id="MiniMaxH3RefPromptBuilder",
             display_name="MiniMax H3 REF 프롬프트 선택기",
@@ -119,7 +170,8 @@ class MiniMaxH3RefPromptBuilder(io.ComfyNode):
     @classmethod
     def execute(cls, subject_source, background_source, camera_source, music_source,
                 subject_kind, action, framing, camera, lighting, style, soundscape, music,
-                camera_direction="지정 안 함"):
+                camera_direction="지정 안 함", prompt_details="{}"):
+        details, fields = parse_details(prompt_details)
         for value, allowed in (
             (subject_source, VISUAL_SOURCES), (background_source, [NONE] + VISUAL_SOURCES),
             (camera_source, [NONE] + VISUAL_SOURCES[9:]),
@@ -152,6 +204,16 @@ class MiniMaxH3RefPromptBuilder(io.ComfyNode):
             audio_in_shot = f"An audience-only instrumental score guided by {music_source} accompanies the shot from its opening and remains continuous as the action develops."
         elif music != "없음":
             audio_in_shot = music_text
+        if "subject_kind" in fields:
+            definitions[0] = describe_interval(definitions[0], fields["subject_kind"], "Subject appearance")
+        setting = describe_interval(setting, fields.get("background_source", {}), "Environment")
+        camera_text = describe_interval(camera_text, fields.get("camera", {}), "Camera movement")
+        music_text = describe_interval(music_text, fields.get("music", {}), "Background music")
+        if "music" in fields:
+            audio_in_shot = music_text if music_text != "N/A" else ""
+        for name in ("framing", "camera_direction", "lighting", "style", "soundscape"):
+            phrases[name] = describe_interval(phrases[name], fields.get(name, {}), name.replace("_", " ").capitalize())
+        action_text = describe_interval(f"<Subject 1> {phrases['action']}.", fields.get("action", {}), "Subject action")
         task = "reference generation + audio reference" if music_source != NONE else "reference generation"
         summary = f"[{task}] A single continuous shot shows <Subject 1> performing a simple action"
         summary += " within <Subject 2>." if background_source != NONE else " in an uncluttered setting."
@@ -160,6 +222,7 @@ class MiniMaxH3RefPromptBuilder(io.ComfyNode):
         if music_source != NONE:
             summary += f" The score references {music_source}."
         direction_text = phrases["camera_direction"] + " " if phrases["camera_direction"] else ""
+        speech_text = "" if any(entry.get("prompt", "").strip() for entry in fields.values()) else "No dialogue, narration, or singing is introduced. "
         detail = (
             f"{phrases['style']}\n[Shot 1] {phrases['framing']}. "
             f"{direction_text}"
@@ -167,7 +230,7 @@ class MiniMaxH3RefPromptBuilder(io.ComfyNode):
             f"{setting} {phrases['lighting']}. "
             "At the opening, the subject is clearly separated from the background, allowing its outline, relative scale, and visible surface details to be read. "
             "The arrangement leaves enough space for the action to unfold without obscuring the subject behind foreground elements. "
-            f"As the shot progresses, <Subject 1> {phrases['action']}. "
+            f"As the shot progresses, {action_text} "
             "The movement develops gradually from the opening state, with a clear beginning, an uninterrupted middle phase, and a settled final pose. "
             "Its proportions and identifying features remain consistent as the viewpoint changes. "
             "Visible contact with the ground or surrounding surfaces stays physically coherent, and shadows follow the same lighting direction throughout. "
@@ -178,11 +241,13 @@ class MiniMaxH3RefPromptBuilder(io.ComfyNode):
             "The chosen light reveals shape and texture continuously; highlights and shaded areas evolve smoothly with the visible motion. "
             "There are no abrupt changes of location or unexplained substitutions of the subject during the shot. "
             f"{phrases['soundscape']} {audio_in_shot} "
-            "No dialogue, narration, or singing is introduced. "
+            f"{speech_text}"
             "As the action concludes, the subject settles naturally and the composition remains stable long enough to read the final state. "
             "The ending grows directly from the preceding movement, preserving the same subject, environment, and lighting through the last frame. "
             "The shot remains continuous throughout, with no intervening cut or sudden transition to another scene."
         )
+        if details:
+            summary += f" The target duration is {details.get('duration', 5):g} seconds."
         sections = {
             "subject_definitions": "\n".join(definitions), "summary": summary,
             "retention_analysis": "\n".join(retention), "detailed_description": detail,
